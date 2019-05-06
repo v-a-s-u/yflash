@@ -1,0 +1,98 @@
+// VerilogA for Yflash_stochastic, Yflash_model, veriloga
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module yflash_model(src_read, src_inj, sub, dra);
+inout  src_read, src_inj, dra, sub;
+electrical src_inj, dra, sub;
+electrical src_read;
+integer prob_seed;
+ground gnd;
+
+//PARAMETERS
+parameter real vth_init = 1;			//Initial value of Vth
+parameter real CRprog = 0.48;
+parameter real K_Cfr_45 = 5.1e-5;
+parameter real K_Cfr_5 = 2.1e-4;			//values of bp45 & bp5 depend on the time it takes to switch the particular voltage. Dependent on device dynamics
+parameter real mvt = 0.144765;	//Technology constant*VT
+parameter real CR = 1;				//for Read mode
+parameter real iread = 1e-9;		//IDS in sub-threshold at VDS = 2V and Vth = 2V
+parameter real prob_seed_in = 0;
+
+//give a time step value of (resolution*1u) while performing the transient analysis
+parameter real resolution = 1; 		//used to improve the output graph resolution (functionality)
+
+// LOCAL VARIABLES
+real vds;									//drain-source voltage
+real vth; 									//state variable vth
+real dvthdt;
+real first_iter = 0;						//initialised to zero 	
+real i;
+real tau = 7e-7;
+real time_step = 10e-6;
+real randm;
+real lambda;
+real prob_t;
+real align = 500000 ;
+									//output current
+
+//////////////////// MAIN ////////////////////////
+analog begin
+		//initializing vth
+		if(first_iter==0) begin
+			vth = vth_init;
+			first_iter = 1;
+		end
+//device behaviour as a memristor
+//Includes programming(for 4.5V, 5V), erase(for 8V) and read for 2V
+//Read mode -- subthreshold mode conduction
+		if(V(dra,src_read)<= 2.0)begin
+			i = iread*exp((CR*(V(dra,src_read)))/(mvt))*exp(-vth/mvt);
+			dvthdt = 0;
+			I(dra) <+ i;
+			I(src_read) <+ -i;
+		end
+		lambda= 1/tau;
+		prob_t = lambda*exp(-1*time_step/tau)/100000;
+		
+//Programming mode 4.5V short-channel
+		if (V(dra,src_inj)== 4.5) begin  
+			prob_seed = prob_seed_in;
+			randm = $rdist_uniform(1, 0, 1);
+			if (prob_t/5 >= randm) begin
+				dvthdt = K_Cfr_45*(CRprog*V(dra,src_inj) - vth);	//b45 = (K'(=uCoxW/2)/Cfr)*P(Ev), a45 = CRprog = 0.48
+				dvthdt = dvthdt + sqrt(dvthdt)*prob_t/5;
+			end
+			I(dra, src_inj) <+ 0;
+		end
+//Programming mode 5V short-channel
+		if (V(dra,src_inj) >= 4.9 && V(dra,src_inj) <= 5.1) begin
+			prob_seed = prob_seed_in;			
+			randm = $rdist_uniform(10, 0, 1);
+			if (prob_t/5 >= randm) begin
+				dvthdt = K_Cfr_5*(CRprog*V(dra,src_inj) - vth);
+				dvthdt = dvthdt + sqrt(dvthdt)*prob_t/5;
+			end
+			I(dra, src_inj) <+ 0;
+		end
+//Erase mode 8V
+		if (V(src_inj,gnd) == 8) begin
+			prob_seed = prob_seed_in;
+			randm = $rdist_uniform(1, 0, 1);
+ 			if (prob_t/5 >= randm) begin
+				dvthdt = 4.6428e-4*(0.9531-vth)*exp((-0.07)/(0.9531-vth)); //constants = A/(Cdep*tox), B*tox
+				dvthdt = dvthdt + sqrt(dvthdt)*prob_t/5;
+			end
+		end
+
+//defining window function b/w vth = [1,2]V
+if(vth < 1.0 || vth > 2.0)begin
+	dvthdt = 0;
+end
+vth = vth + resolution*dvthdt;
+//Updating output nodes
+		I(sub) <+ 0;
+dvthdt = 0;
+end
+endmodule
